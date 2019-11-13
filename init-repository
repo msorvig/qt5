@@ -35,6 +35,7 @@
 use v5.8;
 use strict;
 use warnings;
+use Parallel::Loops;
 
 package Qt::InitRepository;
 
@@ -404,17 +405,20 @@ sub git_clone_all_submodules
     die("Dirty submodule(s) present; cannot proceed.\n")
         if ($any_bad);
 
-    foreach my $module (@modules) {
-        $self->git_clone_one_submodule($subdirs{$module}, $subbases{$module},
-                                       $co_branch && $subbranches{$module}, $alternates);
-    }
+    my $maxProcs = 64;
+    my $pl = Parallel::Loops->new($maxProcs);
+
+    $pl->foreach(\@modules, sub {
+        $self->git_clone_one_submodule($subdirs{$_}, $subbases{$_},
+                                       $co_branch && $subbranches{$_}, $alternates);
+    });
 
     if ($co_branch) {
-        foreach my $module (@modules) {
-            my $branch = $subbranches{$module};
-            die("No branch defined for submodule $module.\n") if (!defined($branch));
+        $pl->foreach(\@modules, sub {
+            my $branch = $subbranches{$_};
+            die("No branch defined for submodule $_.\n") if (!defined($branch));
             my $orig_cwd = getcwd();
-            my $module_dir = $subdirs{$module};
+            my $module_dir = $subdirs{$_};
             chdir($module_dir) or confess "chdir $module_dir: $OS_ERROR";
             my $br = qx(git rev-parse -q --verify $branch);
             if (!$br) {
@@ -423,21 +427,21 @@ sub git_clone_all_submodules
                 $self->exe('git', 'checkout', $branch);
             }
             chdir("$orig_cwd") or confess "chdir $orig_cwd: $OS_ERROR";
-        }
+        });
     }
     if ($self->{update}) {
         my @cmd = ('git', 'submodule', 'update', '--force', '--no-fetch');
         push @cmd, '--remote', '--rebase' if ($co_branch);
         $self->exe(@cmd);
 
-        foreach my $module (@modules) {
-            if (-f $module.'/.gitmodules') {
+        $pl->foreach(\@modules, sub {
+            if (-f $_.'/.gitmodules') {
                 my $orig_cwd = getcwd();
-                chdir($module) or confess "chdir $module: $OS_ERROR";
-                $self->git_clone_all_submodules($subbases{$module}, 0, "$alternates/$module", "all");
+                chdir($_) or confess "chdir $_: $OS_ERROR";
+                $self->git_clone_all_submodules($subbases{$_}, 0, "$alternates/$_", "all");
                 chdir("$orig_cwd") or confess "chdir $orig_cwd: $OS_ERROR";
             }
-        }
+        });
     }
 
     return;
